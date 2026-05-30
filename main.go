@@ -24,7 +24,7 @@ import (
 
 const (
 	AppName = "MeshBan"
-	Version = "0.1.0-dev"
+	Version = "0.1.1-dev"
 )
 
 func main() {

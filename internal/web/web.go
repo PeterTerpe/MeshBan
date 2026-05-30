@@ -1008,12 +1008,15 @@ func (h *Handler) databaseDoVerifySignature(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := h.identityService.VerifyBanSignature(playerUUID, reason, sourceNodeID, signature, updatedAt); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	if err := h.identityService.VerifyBanSignature(ctx, playerUUID, reason, sourceNodeID, signature, updatedAt); err != nil {
 		h.flashDatabase(w, r, "", "signature verification failed: "+err.Error())
 		return
 	}
 
-	h.flashDatabase(w, r, "signature is valid - signed by local node "+h.identityService.Current().NodeID, "")
+	h.flashDatabase(w, r, "signature is valid - signed by node "+sourceNodeID, "")
 }
 
 func (h *Handler) databaseDoNodeCreate(w http.ResponseWriter, r *http.Request) {
@@ -1245,6 +1248,8 @@ func (h *Handler) handleIdentityPage(w http.ResponseWriter, r *http.Request) {
 		h.identityDoImport(w, r)
 	case "new-keypair":
 		h.identityDoNewKeyPair(w, r)
+	case "rename":
+		h.identityDoRename(w, r)
 	default:
 		h.flashIdentity(w, "", "unknown action")
 	}
@@ -1283,6 +1288,33 @@ func (h *Handler) identityDoNewKeyPair(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.flashIdentity(w, "new key pair created", "")
+}
+
+func (h *Handler) identityDoRename(w http.ResponseWriter, r *http.Request) {
+	displayName := strings.TrimSpace(r.FormValue("display_name"))
+	if displayName == "" {
+		h.flashIdentity(w, "", "display name is required")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := h.identityService.UpdateCertificateDisplayName(ctx, displayName); err != nil {
+		h.flashIdentity(w, "", err.Error())
+		return
+	}
+
+	// Also update the config so the display name persists across restarts.
+	if h.config != nil {
+		h.config.Node.DisplayName = displayName
+		if err := config.Save(h.configPath, h.config); err != nil {
+			h.flashIdentity(w, "display name updated in certificate but failed to save config: "+err.Error(), "")
+			return
+		}
+	}
+
+	h.flashIdentity(w, "display name updated to: "+displayName, "")
 }
 
 func (h *Handler) handleExportIdentity(w http.ResponseWriter, r *http.Request) {

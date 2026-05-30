@@ -159,7 +159,7 @@ func (c *Client) queryNode(ctx context.Context, playerUUID string, node database
 	// Validate each entry's signature against the node's public key.
 	var validEntries []database.BanEntry
 	for _, entry := range queryResp.Entries {
-		if err := identity.VerifyBanSignatureWithPublicKey(
+		if err := identity.VerifyBanSignatureWithKey(
 			node.PublicKey,
 			entry.PlayerUUID,
 			entry.Reason,

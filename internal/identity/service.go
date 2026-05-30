@@ -40,6 +40,16 @@ type Identity struct {
 	UpdatedAt   int64
 }
 
+// DisplayName parses the certificate JSON and returns the display name, or
+// an empty string if parsing fails.
+func (i *Identity) DisplayName() string {
+	var cert Certificate
+	if err := json.Unmarshal([]byte(i.Certificate), &cert); err != nil {
+		return ""
+	}
+	return cert.DisplayName
+}
+
 type Certificate struct {
 	Type        string `json:"type"`
 	NodeID      string `json:"node_id"`
@@ -77,6 +87,11 @@ func LoadOrCreate(ctx context.Context, db *database.Database, displayName string
 			return nil, err
 		}
 
+		// Ensure the local identity is present in the nodes database.
+		if err := service.syncLocalIdentityToNodes(ctx); err != nil {
+			return nil, fmt.Errorf("failed to sync local identity to nodes: %w", err)
+		}
+
 		return service, nil
 	}
 
@@ -94,6 +109,11 @@ func LoadOrCreate(ctx context.Context, db *database.Database, displayName string
 	}
 
 	service.current = identity
+
+	// Ensure the new identity is present in the nodes database.
+	if err := service.syncLocalIdentityToNodes(ctx); err != nil {
+		return nil, fmt.Errorf("failed to sync local identity to nodes: %w", err)
+	}
 
 	return service, nil
 }
@@ -196,7 +216,8 @@ func (s *Service) ImportKeyPairJSON(ctx context.Context, raw []byte) error {
 	s.current = identity
 	s.mu.Unlock()
 
-	return nil
+	// Sync the imported identity to the nodes database with ultimate trust.
+	return s.SyncLocalIdentityToNodes(ctx)
 }
 
 func (s *Service) SignLocalBan(playerUUID string, reason string, sourceNodeID string, updatedAt int64) (string, error) {
@@ -214,20 +235,21 @@ func (s *Service) SignLocalBan(playerUUID string, reason string, sourceNodeID st
 	return encodeBase64(signature), nil
 }
 
-// VerifyBanSignature checks whether a ban entry's signature is valid against the local identity's public key.
-// It returns nil if valid, or an error describing why verification failed.
-func (s *Service) VerifyBanSignature(playerUUID, reason, sourceNodeID, signature string, updatedAt int64) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// VerifyBanSignature looks up the source node's public key from the local nodes
+// database and uses it to verify the ban entry's signature.  It returns nil if
+// the signature is valid, or an error describing why verification failed.
+func (s *Service) VerifyBanSignature(ctx context.Context, playerUUID, reason, sourceNodeID, signature string, updatedAt int64) error {
+	node, err := s.database.GetNode(ctx, sourceNodeID)
+	if err != nil {
+		return fmt.Errorf("failed to look up source node %s: %w", sourceNodeID, err)
+	}
 
-	return VerifyBanSignatureWithPublicKey(s.current.PublicKey, playerUUID, reason, sourceNodeID, signature, updatedAt)
+	return VerifyBanSignatureWithKey(node.PublicKey, playerUUID, reason, sourceNodeID, signature, updatedAt)
 }
 
-// VerifyBanSignatureWithPublicKey checks whether a ban entry's signature is
-// valid against an arbitrary base64-encoded ed25519 public key.  This is used
-// when verifying ban entries received from a remote node whose certificate
-// (and hence public key) was previously stored in the local database.
-func VerifyBanSignatureWithPublicKey(publicKeyBase64 string, playerUUID, reason, sourceNodeID, signature string, updatedAt int64) error {
+// verifyBanSignature checks whether a ban entry's signature is valid against
+// a base64-encoded ed25519 public key.
+func VerifyBanSignatureWithKey(publicKeyBase64 string, playerUUID, reason, sourceNodeID, signature string, updatedAt int64) error {
 	pubKeyBytes, err := decodeBase64(publicKeyBase64)
 	if err != nil {
 		return fmt.Errorf("failed to decode public key: %w", err)
@@ -473,5 +495,55 @@ func (s *Service) CreateNewIdentity(ctx context.Context, displayName string) err
 	s.current = newIdentity
 	s.mu.Unlock()
 
-	return nil
+	// Sync the new identity to the nodes database with ultimate trust.
+	return s.SyncLocalIdentityToNodes(ctx)
+}
+
+// SyncLocalIdentityToNodes inserts or updates the local identity as a node
+// record in the nodes database with ultimate trust level.  This ensures the
+// local node is always present and trusted when verifying signatures or
+// evaluating trust-based policies.
+func (s *Service) SyncLocalIdentityToNodes(ctx context.Context) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.syncLocalIdentityToNodes(ctx)
+}
+
+func (s *Service) syncLocalIdentityToNodes(ctx context.Context) error {
+	// Note: caller must hold at least a read lock.
+	node := database.NodeRecord{
+		NodeID:      s.current.NodeID,
+		Certificate: s.current.Certificate,
+		PublicKey:   s.current.PublicKey,
+		TrustLevel:  database.TrustUltimate,
+	}
+	return s.database.UpsertNode(ctx, node)
+}
+
+// UpdateCertificateDisplayName recreates the local identity's certificate with
+// a new display name and persists the change both to the local identity and to
+// the nodes database.
+func (s *Service) UpdateCertificateDisplayName(ctx context.Context, displayName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if displayName == "" {
+		return fmt.Errorf("display name must not be empty")
+	}
+
+	newCertificate, err := createCertificate(s.current, displayName, s.keyOptions)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	s.current.Certificate = newCertificate
+	s.current.UpdatedAt = time.Now().Unix()
+
+	if err := s.database.SaveIdentity(ctx, s.current.toRecord()); err != nil {
+		return fmt.Errorf("failed to save identity: %w", err)
+	}
+
+	// Also update the node record in the nodes database.
+	return s.syncLocalIdentityToNodes(ctx)
 }

@@ -15,6 +15,22 @@
         <p><strong>Node ID:</strong></p>
         <p><code>{{.LocalIdentity.NodeID}}</code></p>
 
+        <p><strong>Display Name:</strong></p>
+        <p>
+            <code>{{.LocalIdentity.DisplayName}}</code>
+            <button class="secondary-button" type="button" onclick="document.getElementById('rename-form').style.display='block'">Edit</button>
+        </p>
+
+        <div id="rename-form" style="display:none; margin-top: 8px;">
+            <form method="post" action="">
+                <input type="hidden" name="_action" value="rename">
+                <label>New Display Name</label>
+                <input class="input" name="display_name" value="{{.LocalIdentity.DisplayName}}" placeholder="My MeshBan Node">
+                <button class="button" type="submit">Save Display Name</button>
+                <button class="secondary-button" type="button" onclick="document.getElementById('rename-form').style.display='none'">Cancel</button>
+            </form>
+        </div>
+
         <p><strong>Public Key:</strong></p>
         <textarea readonly class="large-textarea">{{.LocalIdentity.PublicKey}}</textarea>
 
